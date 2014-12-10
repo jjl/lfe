@@ -5,6 +5,7 @@
 BINDIR = bin
 EBINDIR = ebin
 SRCDIR = src
+DIADIR = dialyzer
 CSRCDIR = c_src
 INCDIR = include
 DOCDIR = doc
@@ -35,9 +36,13 @@ GET_VERSION = '{ok,[App]}=file:consult("src/$(LIB).app.src"), \
 
 ## The .erl, .xrl, .yrl and .beam files
 ESRCS = $(notdir $(wildcard $(SRCDIR)/*.erl))
+DSRCS = $(notdir $(wildcard $(DIADIR)/*.erl))
 XSRCS = $(notdir $(wildcard $(SRCDIR)/*.xrl))
 YSRCS = $(notdir $(wildcard $(SRCDIR)/*.yrl))
-EBINS = $(ESRCS:.erl=.beam) $(XSRCS:.xrl=.beam) $(YSRCS:.yrl=.beam)
+EBINS = $(ESRCS:.erl=.beam) $(XSRCS:.xrl=.beam) $(YSRCS:.yrl=.beam) $(DSRCS:.erl=.beam)
+
+CFLAGS =
+CC = cc
 
 CSRCS = $(notdir $(wildcard $(CSRCDIR)/*.c))
 BINS = $(CSRCS:.c=)
@@ -48,10 +53,13 @@ DESTBINDIR = $(PREFIX)$(shell dirname `which erl` 2> /dev/null || echo "/usr/loc
 .SUFFIXES: .erl .beam
 
 $(BINDIR)/%: $(CSRCDIR)/%.c
-	cc -o $@ $<
+	cc -o $@ $(CFLAGS) $<
 
 $(EBINDIR)/%.beam: $(SRCDIR)/%.erl
 	$(ERLC) -I $(INCDIR) -o $(EBINDIR) $(HAS_MAPS) $(ERLCFLAGS) $<
+
+$(EBINDIR)/%.beam: $(DIADIR)/%.erl
+	$(ERLC) -I $(INCDIR) -o $(EBINDIR) -DVSN='"6.6.6"' $<
 
 %.erl: %.xrl
 	$(ERLC) -o $(SRCDIR) $<
@@ -84,6 +92,7 @@ install:
 	ln -s `pwd`/bin/lfe $(DESTBINDIR)
 	ln -s `pwd`/bin/lfec $(DESTBINDIR)
 	ln -s `pwd`/bin/lfescript $(DESTBINDIR)
+	ln -s `pwd`/bin/ldialyzer $(DESTBINDIR)
 
 docs:
 
