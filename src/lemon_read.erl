@@ -46,38 +46,44 @@
 -type position() :: {non_neg_integer(), non_neg_integer()}.
 -type positions() :: {position(), position()}.
 -type state() :: {binary(), positions()}.
--type goodreturn() :: { 'ok', any(), state()}.
--type errortype() :: 'unexpected' | 'expected'.
--type errorreturn() :: {'error', errortype(), atom() | pos_integer(), positions()}.
--type readreturn() :: goodreturn() | errorreturn().
+-type goodtuple(T) :: {'ok', T, state()}.
+-type unexpected() :: non_neg_integer() | 'eof'.
+-type expected() :: atom().
+-type numberbase() :: 2..36.
+-type err_expected() :: {'error', 'expected', expected(), positions()}.
+-type err_unexpected() :: {'error', 'unexpected', unexpected(), positions()}.
+-type badtuple() :: err_expected() | err_unexpected().
+-type returntuple(T) :: goodtuple(T) | badtuple().
 
-%%%%%%%% public
+%%%%%%%% public<
 
--export([read/1, read/3]).
+-export([read/1, read/2]).
 
-read(Source) -> read(Source, {0,0}, unset). %% minor ick, massive deduplication
-read(<<>>, Pos, StartPos) -> {error, unexpected, eof, Pos, StartPos};
-read(Source, Pos, StartPos) ->
-    {ok, _, Source2,Pos2={Line,Col}, _} = skip_whitespace(Source, Pos),
+-spec read(binary()) -> returntuple(any()).
+-spec read(binary(), positions() | {position(),'unset'}) -> returntuple(any).
+
+read(Source) -> read(Source, {{0,0}, unset}). %% minor ick, massive deduplication
+read(Source, Pos) ->
+    {ok, _, Source2,Pos2={{Line,Col}, StartPos}} = skip_whitespace(Source, Pos),
     StartPos2 = case StartPos of unset -> Pos2; _ -> StartPos end,
     case Source2 of
-	<<>> -> {error, unexpected, eof, Pos2, StartPos2};
+	<<>> -> {error, unexpected, eof, {{Line, Col}, StartPos2}};
 	<<C/utf8, Rest/binary>> ->
-	    NuPos={Line,Col+1},
+	    NuPos={{Line,Col+1},StartPos2},
 	    case C of
-		$'  -> read_quote(Rest, Pos2, StartPos2);
-		$\\ -> read_char(Rest, NuPos, StartPos2);
-		$#  -> read_special(Rest, NuPos, StartPos2);
-		$;  -> read_comment(Rest, NuPos, StartPos2);
-		${  -> read_map(Rest, NuPos, StartPos2);
-		$(  -> read_list(Rest, NuPos, StartPos2);
-		$[  -> read_tuple(Rest, NuPos, StartPos2);
-		$"  -> read_string(Rest, NuPos,  StartPos2);
-		$|  -> read_quoted_atom(Rest, NuPos, StartPos2);
-		_ when C =:= $- orelse ?BASE10(C)  -> read_num(Source2, Pos2, StartPos2);
-		_ when ?BANNED(C) -> {error, illegal_char, C, Pos2, StartPos2};
-		_ when ?ATOM1(C)   -> read_atom(Source2, NuPos, StartPos2);
-		_ -> {error, unexpected, C, Pos2, Pos2}
+		$'  -> read_quote(Rest, NuPos);
+		$\\ -> read_char(Rest, NuPos);
+		$#  -> read_special(Rest, NuPos);
+		$;  -> read_comment(Rest, NuPos);
+		${  -> read_map(Rest, NuPos);
+		$(  -> read_list(Rest, NuPos);
+		$[  -> read_tuple(Rest, NuPos);
+		$"  -> read_string(Rest, NuPos);
+		$|  -> read_quoted_atom(Rest, NuPos);
+		_ when C =:= $- orelse ?BASE10(C)  -> read_num(Source2, Pos2);
+		_ when ?BANNED(C) -> {error, illegal_char, C, Pos2};
+		_ when ?ATOM1(C)   -> read_atom(Source2, NuPos);
+		_ -> {error, unexpected, C, Pos2}
 	    end
     end.
 
@@ -85,321 +91,387 @@ read(Source, Pos, StartPos) ->
 
 %% quote
 
-%% -spec(read_quote( binary(), position(), position() ) -> goodreturn()).
+-spec read_quote(binary(), positions()) -> returntuple(any()).
 
-read_quote(Source, Pos, StartPos) ->
-    {ok, T, Rest, Pos2, _} = read(Source, Pos, StartPos),
-    {ok, [quote, T], Rest, Pos2, StartPos}.
+read_quote(Source, Pos) ->
+    case read(Source, Pos) of
+        {ok, T, Rest, Pos2} -> {ok, [quote, T], Rest, Pos2};
+        R -> R
+    end.
 
 %% comments
 
-read_comment(Source, {Line, _}, StartPos) ->
-    {C,Rest} = binary:split(Source,<<$\n>>),
-    {ok, [comment, C], Rest, {Line+1, 0}, StartPos}.
+-spec read_comment(binary(), tuple()) -> goodtuple(['comment' | binary(),...]).
+
+read_comment(Source, {{Line, _}, StartPos}) ->
+    [C,Rest] = binary:split(Source,<<$\n>>),
+    {ok, [comment, C], Rest, {{Line+1, 0}, StartPos}}.
 
 %% lists, tuples, maps
 
-read_list(Source, Pos, StartPos) ->
-    read_coll([], Source, Pos, StartPos, <<$)>>).
+-spec read_list(binary(), positions()) -> returntuple(list()).
 
-read_tuple(Source, Pos, StartPos) ->
-    case read_coll([], Source, Pos, StartPos, <<$]>>) of
-	{ok, T, Rest, Pos2, _} -> {ok, list_to_tuple(T), Rest, Pos2, StartPos};
+read_list(Source, {Pos, StartPos}) ->
+    read_coll([], Source, {Pos, StartPos}, <<$)>>).
+
+-spec read_tuple(binary(), positions()) -> returntuple(tuple()).
+
+read_tuple(Source, {Pos, StartPos}) ->
+    case read_coll([], Source, {Pos, StartPos}, <<$]>>) of
+	{ok, T, Rest, Pos2} -> {ok, list_to_tuple(T), Rest, Pos2};
 	R -> R
     end.
 
-read_map(Source, Pos, StartPos) ->
-    case read_pairs([], Source, Pos, StartPos, <<$}>>) of
-	{ok, T, Rest, Pos2, _} -> {ok, maps:from_list(T), Rest, Pos2, StartPos};
+-spec read_map(binary(), positions()) -> returntuple(map()).
+
+read_map(Source, Pos) ->
+    case read_pairs([], Source, Pos, <<$}>>) of
+	{ok, T, Rest, Pos2} -> {ok, maps:from_list(T), Rest, Pos2};
 	R -> R
     end.
 		
-read_form_or_end(Source, Pos, StartPos, End) ->
-    {ok, _, Source2, Pos2={Line, Col}, _} = skip_whitespace(Source, Pos, StartPos),
+-spec read_form_or_end(binary(), positions(), binary()) -> returntuple(any()).
+
+read_form_or_end(Source, Pos, End) ->
+    {ok, _, Source2, Pos2={{Line, Col},StartPos}} = skip_whitespace(Source, Pos),
     BS = byte_size(End),
     case binary:longest_common_prefix([End, Source2]) of
         L when BS =:= L ->
             BP = binary:part(Source, byte_size(End), byte_size(Source) - byte_size(End)),
-            {done, $_, BP, {Line, Col+BS}, StartPos};
-        _ -> read(Source2, Pos2, StartPos)
+            {done, $_, BP, {{Line, Col+BS}, StartPos}};
+        _ -> read(Source2, Pos2)
     end.
 
-read_coll(Acc, Source, Pos, StartPos, End) ->
-    io:format("read_coll: ~p~n", [[Acc, Source, Pos, StartPos, End]]),
-    case read_form_or_end(Source, Pos, StartPos, End) of
-        {done, V, Source2, Pos2, _} -> {ok, lists:reverse([V|Acc]), Source2, Pos2, StartPos};
-        {ok, V, Source2, Pos2, _} -> read_coll([V|Acc], Source2, Pos2, StartPos, End)
+-spec read_coll(list(), binary(), positions(), binary()) -> returntuple(list()).
+
+read_coll(Acc, Source, Pos, End) ->
+    case read_form_or_end(Source, Pos, End) of
+        {done, V, Source2, Pos2} -> {ok, lists:reverse([V|Acc]), Source2, Pos2};
+        {ok, V, Source2, Pos2} -> read_coll([V|Acc], Source2, Pos2, End);
+        R -> R
     end.
 
-read_pairs(Acc, Source, Pos, StartPos, End) ->
-    case read_form_or_end(Source, Pos, StartPos, End) of
-        {ok, V, Source2, Pos2, _} -> % 
-            case read_form_or_end(Source2, Pos2, StartPos, End) of
-                {ok, V2, Source3, Pos3, _} ->
-                    read_pairs([{V,V2}|Acc], Source3, Pos3, StartPos, End);
-                {done, _, _, Pos3, _} -> {error, uneven_map, [V|Acc], Pos3, StartPos};
+-spec read_pairs(list(), binary(), positions(), binary()) -> returntuple(list()).
+
+read_pairs(Acc, Source, Pos, End) ->
+    case read_form_or_end(Source, Pos, End) of
+        {ok, V, Source2, Pos2} -> % 
+            case read_form_or_end(Source2, Pos2, End) of
+                {ok, V2, Source3, Pos3} ->
+                    read_pairs([{V,V2}|Acc], Source3, Pos3, End);
+                {done, _, _, Pos3} -> {error, uneven_map, [V|Acc], Pos3};
                 R -> R
             end;
-        {done, _, Rest, Pos2, _} -> {ok, lists:reverse(Acc), Rest, Pos2, StartPos};
+        {done, _, Rest, Pos2} -> {ok, lists:reverse(Acc), Rest, Pos2};
         R -> R
     end.
 
 %% strings
 
-read_string(Source, Pos={Line, Col}, StartPos) ->
+-spec read_string(binary(), positions()) -> returntuple(string()).
+
+read_string(Source, Pos={{Line, Col}, StartPos}) ->
     case Source of
-        <<$\",$\", Rest/binary>> -> read_string("", Rest, {Line, Col+2}, StartPos, <<$\",$\",$\">>);
-        <<$\",     Rest/binary>> -> {ok, "", Rest, {Line, Col+1}, StartPos};
-        _ -> read_string("", Source, Pos, Pos, <<$\">>)
+        <<$\",$\", Rest/binary>> -> read_string("", Rest, {{Line, Col+2}, StartPos}, <<$\",$\",$\">>);
+        <<$\",     Rest/binary>> -> {ok, "", Rest, {{Line, Col+1}, StartPos}};
+        _ -> read_string("", Source, Pos, <<$\">>)
     end.
 
-read_string(Acc, Source, Pos={Line, Col}, StartPos, End) ->
-    io:format("read_string: ~p~n", [[Acc, Source, Pos, StartPos, End]]),
+-spec read_string(string(), binary(), positions(), binary()) -> returntuple(string()).
+
+read_string(Acc, Source, Pos={{Line, Col}, StartPos}, End) ->
     case Source of
-        <<>> -> {error, unexpected, eof, Pos, StartPos};
+        <<>> -> {error, unexpected, eof, Pos};
         <<$\\, _/binary>> -> 
-            {ok, T, Rest, Pos2, _} = read_char(Source, Pos, StartPos),
-            read_string([T|Acc], Rest, Pos2, StartPos, End);
+            {ok, T, Rest, Pos2} = read_char(Source, Pos),
+            read_string([T|Acc], Rest, Pos2, End);
         <<C/utf8, Rest/binary>> ->
             BS = byte_size(End),
             case binary:longest_common_prefix([End, Source]) of
                 L when BS =:= L ->
                     BP = binary:part(Source, byte_size(End), byte_size(Source) - byte_size(End)),
-                    {ok, lists:reverse(Acc), BP, {Line, Col+BS}, StartPos};
-                _ -> read_string([C|Acc], Rest, {Line, Col+1}, StartPos, End)
+                    {ok, lists:reverse(Acc), BP, {{Line, Col+BS}, StartPos}};
+                _ -> read_string([C|Acc], Rest, {{Line, Col+1}, StartPos}, End)
             end
     end.
 
-%% I think \x should be optionally terminated by a semicolon
-read_char(Source, Pos={Line, Col}, StartPos) ->
-    NuPos = {Line, Col+1},
+-spec read_char(binary(), positions()) -> returntuple(non_neg_integer()).
+
+read_char(Source, Pos={{Line, Col}, StartPos}) ->
+    NuPos = {{Line, Col+1}, StartPos},
     case Source of
-        <<>>     -> {error, unexpected, eof, Pos, StartPos};
-        <<$\\, $x, Source2/binary>> -> raw_read_int([], Source2, NuPos, StartPos, 16);
+        <<>>     -> {error, unexpected, eof, Pos};
+        <<$\\, $x, Source2/binary>> -> raw_read_int([], Source2, NuPos, 16);
         <<$\\, $u, _/binary>> -> read_uni_char(Source, Pos);
-        <<$\\, $b, Rest/binary>> -> {ok, $\b,   Rest, NuPos, StartPos};
-        <<$\\, $t, Rest/binary>> -> {ok, $\t,   Rest, NuPos, StartPos};
-        <<$\\, $n, Rest/binary>> -> {ok, $\n,   Rest, NuPos, StartPos};
-        <<$\\, $v, Rest/binary>> -> {ok, $\v,   Rest, NuPos, StartPos};
-        <<$\\, $f, Rest/binary>> -> {ok, $\f,   Rest, NuPos, StartPos};
-        <<$\\, $r, Rest/binary>> -> {ok, $\r,   Rest, NuPos, StartPos};
-        <<$\\, $e, Rest/binary>> -> {ok, $\e,   Rest, NuPos, StartPos};
-        <<$\\, $s, Rest/binary>> -> {ok, $\s,   Rest, NuPos, StartPos};
-        <<$\\, $d, Rest/binary>> -> {ok, $\d,   Rest, NuPos, StartPos};
-        <<C/utf8,  Rest/binary>> -> {ok, C, Rest, NuPos, StartPos}
+        <<$\\, $b, Rest/binary>> -> {ok, $\b,   Rest, NuPos};
+        <<$\\, $t, Rest/binary>> -> {ok, $\t,   Rest, NuPos};
+        <<$\\, $n, Rest/binary>> -> {ok, $\n,   Rest, NuPos};
+        <<$\\, $v, Rest/binary>> -> {ok, $\v,   Rest, NuPos};
+        <<$\\, $f, Rest/binary>> -> {ok, $\f,   Rest, NuPos};
+        <<$\\, $r, Rest/binary>> -> {ok, $\r,   Rest, NuPos};
+        <<$\\, $e, Rest/binary>> -> {ok, $\e,   Rest, NuPos};
+        <<$\\, $s, Rest/binary>> -> {ok, $\s,   Rest, NuPos};
+        <<$\\, $d, Rest/binary>> -> {ok, $\d,   Rest, NuPos};
+        <<C/utf8,  Rest/binary>> -> {ok, C,     Rest, NuPos}
     end.
+
              
 %% TODO: `{LATIN_SMALL_LETTER_A_WITH_DIARESIS}` etc.
 read_uni_char(Source, Pos={Line, Col}) ->
     {error, not_implemented, unicode_escape_syntax}.
 
-%% Specials. NOTE: We haven't setled on the final assignments of these
+-spec read_regex(string(), binary(), positions()) -> returntuple(binary()).
 
-read_regex(Acc, Source, Pos={Line, Col}, StartPos) ->
+read_regex(Acc, Source, Pos={{Line, Col}, StartPos}) ->
     case Source of
-        <<>> -> {error, unexpected, eof, Pos, StartPos};
-        <<$\n, _/binary>>       -> {error, unexpected, $\n, Pos, StartPos};
-        <<"\"", Rest/binary>>   -> {ok, list_to_binary(lists:reverse(Acc)), Rest, {Line, Col+1}, StartPos};
-        <<"\\\"", Rest/binary>> -> read_regex([$\"|Acc], Rest, {Line, Col+2}, StartPos);
-        <<C/utf8, Rest/binary>>      -> read_regex([C|Acc], Rest, {Line, Col+1}, StartPos)
+        <<>> -> {error, unexpected, eof, Pos};
+        <<$\n, _/binary>>       -> {error, unexpected, $\n, Pos};
+        <<"\"", Rest/binary>>   -> {ok, list_to_binary(lists:reverse(Acc)), Rest, {{Line, Col+1}, StartPos}};
+        <<"\\\"", Rest/binary>> -> read_regex([$\"|Acc], Rest, {{Line, Col+2}, StartPos});
+        <<C/utf8, Rest/binary>> -> read_regex([C|Acc], Rest, {{Line, Col+1}, StartPos})
     end.
 
-read_binstring(Source, Pos, StartPos) ->
-    io:format("read_binstring: ~p~n", [[Source, Pos, StartPos]]),
-    case read_string(Source, Pos, StartPos) of
-        {ok, Ret, Rest, NewPos, _} -> {ok, list_to_binary(Ret), Rest, NewPos, StartPos};
+-spec read_binstring(binary(), positions()) -> returntuple(binary()).
+
+read_binstring(Source, Pos) ->
+    case read_string(Source, Pos) of
+        {ok, Ret, Rest, NewPos} -> {ok, list_to_binary(Ret), Rest, NewPos};
         R -> R
     end.
 
-read_shortfun(Source, Pos, StartPos) ->
-    case read_list(Source, Pos, StartPos) of
-        {ok, Ret, Rest, NewPos, _} -> {ok, [rfn|Ret], Rest, NewPos, StartPos};
+-spec read_shortfun(binary(), positions()) -> returntuple(list()).
+
+read_shortfun(Source, Pos) ->
+    case read_list(Source, Pos) of
+        {ok, Ret, Rest, NewPos} -> {ok, [rfn|Ret], Rest, NewPos};
         R -> R
     end.
 
-read_special(Source, Pos={Line, Col},StartPos) ->
+-spec read_special(binary(), positions()) -> returntuple(any()).
+
+read_special(Source, Pos={{Line, Col},StartPos}) ->
     case Source of
-        <<$#, $", Rest/binary>> -> read_regex([], Rest, {Line, Col+2}, StartPos);
-        <<$",     Rest/binary>> -> read_binstring(Rest, {Line, Col+1}, StartPos);
-        <<$(,     Rest/binary>> -> read_shortfun(Rest,  {Line, Col+1}, StartPos);
-        _ -> {error, expected, $#, Pos, StartPos}
+        <<$#, $", Rest/binary>> -> read_regex([], Rest, {{Line, Col+2}, StartPos});
+        <<$",     Rest/binary>> -> read_binstring(Rest, {{Line, Col+1}, StartPos});
+        <<$(,     Rest/binary>> -> read_shortfun(Rest,  {{Line, Col+1}, StartPos});
+        _ -> {error, expected, $#, Pos}
     end.
 
 %% Numbers
 
+-spec read_num(binary(), positions()) -> returntuple(number()).
 
-%% TODO: fixme, I only support non-negative integers without exponents 
-read_num(Source, Pos={Line, Col}, StartPos) ->
+read_num(Source, Pos={{Line, Col}, StartPos}) ->
     case Source of
-        <<>> -> {error, unexpected, eof, Pos, StartPos};
-        <<"0r", Rest/binary>> -> read_radix(Rest, {Line, Col+2}, StartPos);
-        <<"0x", Rest/binary>> -> read_init_digit(Rest, {Line, Col+2}, StartPos, 16, fun read_num/5);
-        <<"0o", Rest/binary>> -> read_init_digit(Rest, {Line, Col+2}, StartPos, 8,  fun read_num/5);
-        <<"0b", Rest/binary>> -> read_init_digit(Rest, {Line, Col+2}, StartPos, 2,  fun read_num/5);
-        _ -> read_init_digit(Source, Pos, Pos, 10, fun read_num/5)
+        <<>> -> {error, unexpected, eof, Pos};
+        <<"0r", Rest/binary>> -> read_radix(Rest, {{Line, Col+2}, StartPos});
+        <<"0x", Rest/binary>> -> read_init_digit(Rest, {{Line, Col+2}, StartPos}, 16, fun read_num/4);
+        <<"0o", Rest/binary>> -> read_init_digit(Rest, {{Line, Col+2}, StartPos}, 8,  fun read_num/4);
+        <<"0b", Rest/binary>> -> read_init_digit(Rest, {{Line, Col+2}, StartPos}, 2,  fun read_num/4);
+        _ -> read_init_digit(Source, Pos, 10, fun read_num/4)
         end.
 
-read_radix(Source, Pos={Line, Col}, StartPos) ->
+-spec read_radix(binary(), positions()) -> returntuple(number()).
+
+read_radix(Source, Pos={{Line, Col}, StartPos}) ->
     case Source of
-        <<>> -> {error, unexpected, eof};
+        <<>> -> {error, unexpected, eof, Pos};
         <<A,$:,   Rest/binary>> when ?BASE10(A) ->
-            read_num([], Rest, {Line, Col+2}, StartPos, list_to_integer([A]));
+            read_num([], Rest, {{Line, Col+2}, StartPos}, list_to_integer([A]));
         <<A,B,$:, Rest/binary>> when ?BASE10(A) andalso ?BASE10(B) ->
-            read_num([], Rest, {Line, Col+3}, StartPos, list_to_integer([B, A]));
+            read_num([], Rest, {{Line, Col+3}, StartPos}, list_to_integer([B, A]));
         _ -> {error, expected, radix_in_decimal, Pos}
     end.
 
-read_init_digit(Source,Pos,StartPos,Base,Basic) -> read_init_digit([], Source, Pos, StartPos, Base, Basic).
+-spec read_init_digit(binary(), positions(), numberbase(), fun((string(), binary(), positions(), numberbase()) -> returntuple(number()))) -> returntuple(number()).
 
-read_init_digit(Acc, Source, Pos={Line, Col}, StartPos, Base, Next) ->
+read_init_digit(Source, Pos={{Line, Col}, StartPos}, Base, Next) ->
+    NuPos = {{Line, Col+1}, StartPos},
     case Source of
-        <<>> -> {error, unexpected, eof, Pos, Pos};
+        <<>> -> {error, unexpected, eof, Pos};
         <<$+, C/utf8, Rest/binary>> ->
             case is_base_n(C, Base) of
-                true  -> Next([C], Rest, {Line, Col+1}, StartPos, 10);
-                false -> {error, expected, {one_of, [$-, {digit_in_base, Base}]}, Pos, Pos}
+                true  -> Next([C], Rest, NuPos, 10);
+                false -> {error, expected, {one_of, [$-, {digit_in_base, Base}]}, Pos}
             end;
         <<$-, C/utf8, Rest/binary>> ->
             case is_base_n(C, Base) of
-                true  -> Next([C,$-], Rest, {Line, Col+1}, StartPos, 10);
-                false -> {error, expected, {one_of, [$-, {digit_in_base, Base}]}, Pos, Pos}
+                true  -> Next([C,$-], Rest, NuPos, 10);
+                false -> {error, expected, {one_of, [$-, {digit_in_base, Base}]}, Pos}
             end;
         <<C/utf8, Rest/binary>> ->
             case is_base_n(C, Base) of
-                true  -> Next([C], Rest, {Line, Col+1}, StartPos, 10);
-                false -> {error, expected, {one_of, [$-, {digit_in_base, Base}]}, Pos, Pos}
+                true  -> Next([C], Rest, NuPos, 10);
+                false -> {error, expected, {one_of, [$-, {digit_in_base, Base}]}, Pos}
             end
     end.
             
-check_num(N, Rest, Pos, StartPos) ->
+-spec check_num(string(), binary(), positions()) -> returntuple(string()).
+
+check_num(N, Rest, Pos) ->
     case N of
-	<<>> -> {error, unexpected, eof, Pos, StartPos};
-        _ -> {ok, N, Rest, Pos, StartPos}
+	<<>> -> {error, unexpected, eof, Pos};
+        _ -> {ok, N, Rest, Pos}
     end.
 
-raw_read_int(Acc, Source, Pos={Line, Col}, StartPos, Base) ->
+-spec raw_read_int(string(), binary(), positions(), pos_integer()) -> returntuple(string()).
+
+raw_read_int(Acc, Source, Pos={{Line, Col}, StartPos}, Base) ->
+    NuPos = {{Line, Col+1}, StartPos},
     case Source of 
-        <<>> -> check_num(Acc, Source, Pos, StartPos);
-        <<$_, Rest/binary>> -> raw_read_int(Acc, Rest, {Line, Col+1}, StartPos, 10);
+        <<>> -> check_num(Acc, Source, Pos);
+        <<$_, Rest/binary>> -> raw_read_int(Acc, Rest, NuPos, 10);
         <<C/utf8, Rest/binary>> ->
             case is_base_n(C, Base) of
-                true  -> raw_read_int([C|Acc], Rest, {Line, Col+1}, StartPos, 10);
-                false -> check_num(Acc, Source, Pos, StartPos)
+                true  -> raw_read_int([C|Acc], Rest, NuPos, 10);
+                false -> check_num(Acc, Source, Pos)
             end
     end.
 
-read_num(Acc, Source, Pos, StartPos, Base) ->
-    case raw_read_int(Acc, Source, Pos, StartPos, Base) of
-        {ok, Acc2, Rest, Pos2, _} -> maybe_extend_num(Acc2, Base, Rest, Pos2, StartPos);
+-spec read_num(list(), binary(), positions(), numberbase()) -> returntuple(number()).
+
+read_num(Acc, Source, Pos, Base) ->
+    case raw_read_int(Acc, Source, Pos, Base) of
+        {ok, Acc2, Rest, Pos2} -> maybe_extend_num(Acc2, Base, Rest, Pos2);
         R -> R
     end.
 
-maybe_exp(I, Base, Source, Pos={Line, Col}, StartPos) ->
+-spec maybe_exp(number(), numberbase(), binary(), positions()) -> returntuple(number()).
+
+maybe_exp(I, Base, Source, Pos={{Line, Col}, StartPos}) ->
+    NuPos = {{Line, Col+1}, StartPos},
     case Source of
         <<$e, $+, Source2/binary>> ->
-            case raw_read_int("", Source2, {Line, Col+1}, StartPos, Base) of
-                {ok, I2, Rest, Pos2, _} ->
+            case raw_read_int("", Source2, NuPos, Base) of
+                {ok, I2, Rest, Pos2} ->
                     I3 = I * math:pow(10, list_to_integer(lists:reverse(I2))),
                     I4 = if is_integer(I) -> list_to_integer(float_to_list(I3,[{decimals, 0}]));
                             true -> I3
                          end,
-                    {ok, I4, Rest, Pos2, StartPos};
+                    {ok, I4, Rest, Pos2};
                 R -> R
             end;
         <<$e, $-, Source2/binary>> ->
-            case raw_read_int("-", Source2, {Line, Col+1}, StartPos, Base) of
-                {ok, I2, Rest, Pos2, _} ->
+            case raw_read_int("-", Source2, NuPos, Base) of
+                {ok, I2, Rest, Pos2} ->
                     I3 = I * math:pow(10, list_to_integer(lists:reverse(I2))),
                     I4 = if is_integer(I) -> list_to_integer(float_to_list(I3,[{decimals, 0}]));
                             true -> I3
                          end,
-                    {ok, I4, Rest, Pos2, StartPos};
+                    {ok, I4, Rest, Pos2};
                 R -> R
             end;
         <<$e, Source2/binary>> ->
-            case raw_read_int("", Source2, {Line, Col+1}, StartPos, Base) of
-                {ok, I2, Rest, Pos2, _} ->
+            case raw_read_int("", Source2, NuPos, Base) of
+                {ok, I2, Rest, Pos2} ->
                     I3 = I * math:pow(10, list_to_integer(lists:reverse(I2))),
                     I4 = if is_integer(I) -> trunc(I3); true -> I3 end,
-                    {ok, I4, Rest, Pos2, StartPos};
+                    {ok, I4, Rest, Pos2};
                 R -> R
             end;
-        <<$;, Rest/binary>> -> {ok, I, Rest, {Line, Col+1}, StartPos};
+        <<$;, Rest/binary>> -> {ok, I, Rest, NuPos};
         _ -> {ok, I, Source, Pos, StartPos}
     end.
             
-maybe_float(Acc, Base, Source, Pos={Line, Col}, StartPos) ->
+-spec maybe_float(string(), numberbase(), binary(), positions()) -> returntuple(number()).
+
+maybe_float(Acc, Base, Source, Pos={{Line, Col}, StartPos}) ->
     case Source of
         <<$., Source2/binary>> ->
-            case raw_read_int("", Source2, {Line, Col+1}, StartPos, Base) of
-                {ok, I, Rest, Pos2, _} ->
+            case raw_read_int("", Source2, {{Line, Col+1}, StartPos}, Base) of
+                {ok, I, Rest, Pos2} ->
                     A1=lists:reverse(Acc),
                     A2=lists:reverse(I),
-                    {ok, list_to_float(A1 ++ [$.|A2]), Rest, Pos2, StartPos};
+                    {ok, list_to_float(A1 ++ [$.|A2]), Rest, Pos2};
                 R -> R
             end;
-        _ -> {ok, list_to_integer(lists:reverse(Acc)), Source, Pos, StartPos}
+        _ -> {ok, list_to_integer(lists:reverse(Acc)), Source, Pos}
     end.
 
-maybe_extend_num(Acc, Base, Source, Pos, StartPos) ->
-    {ok, Acc2, Rest, Pos2, _} = maybe_float(Acc,Base,Source,Pos, StartPos),
-    maybe_exp(Acc2, Base, Rest, Pos2, StartPos).
+-spec maybe_extend_num(string(), numberbase(), binary(), positions()) -> returntuple(number()).
+
+maybe_extend_num(Acc, Base, Source, Pos) ->
+    case maybe_float(Acc,Base,Source,Pos) of
+        {ok, Acc2, Rest, Pos2} -> maybe_exp(Acc2, Base, Rest, Pos2);
+        R -> R
+    end.
+
+-spec base36(integer()) -> integer().
 
 %% not supporting capitals is a bit opinionated, but i'm not inclined to change it
 base36(C) when ?BASE10(C) -> C - $0;
 base36(C) when ?LOWER(C)  -> C + 10 - $a;
 base36(_) -> 36. % never < 36
 
+-spec is_base_n(integer(), integer()) -> boolean().
+
 is_base_n(C, B) -> base36(C) < B.
 
 %% atoms
 
+-spec quoted_atom_char(non_neg_integer()) -> boolean().
+-spec atom_char(non_neg_integer()) -> boolean().
+
 quoted_atom_char(C) -> ?QSYM(C).
 atom_char(C) -> ?ATOM(C).
 
-read_atom(Source, Pos, StartPos) ->
-    {ok, S, Rest, Pos2,_} = read_while("", Source, Pos, StartPos, fun atom_char/1, atom_char),
-    {ok, list_to_atom(S), Rest, Pos2, StartPos}.
+-spec read_atom(binary(), positions()) -> returntuple(atom()).
 
-read_quoted_atom(Source, Pos, StartPos) ->
-    {ok, S, Source2, Pos2={Line, Col}, _} = read_while("", Source, Pos, StartPos, fun quoted_atom_char/1, quoted_atom_char),
-    case Source2 of
-        <<>> -> {error, unexpected, eof, Pos, StartPos};
-        <<C/utf8, Rest/binary>> ->
-            case C of
-                $| -> {ok, list_to_atom(S), Rest, {Line, Col+1}, StartPos};
-                _ -> {error, expected, $|, Pos2, StartPos}
-            end
+read_atom(Source, Pos) ->
+    case read_while("", Source, Pos, fun atom_char/1, atom_char) of
+        {ok, S, Rest, Pos2} -> {ok, list_to_atom(S), Rest, Pos2};
+        R -> R
     end.
 
-read_while(Acc, Source, Pos={Line, Col}, StartPos, Fun, Name) ->
+-spec read_quoted_atom(binary(), positions()) -> returntuple(atom()).
+
+read_quoted_atom(Source, Pos) ->
+    case read_while("", Source, Pos, fun quoted_atom_char/1, quoted_atom_char) of
+        {ok, S, Source2, Pos2={{Line, Col},StartPos}} ->
+            case Source2 of
+                <<>> -> {error, unexpected, eof, Pos2};
+                <<C/utf8, Rest/binary>> ->
+                    case C of
+                        $| -> {ok, list_to_atom(S), Rest, {{Line, Col+1}, StartPos}};
+                        _ -> {error, expected, $|, Pos2}
+                    end
+            end;
+        R -> R
+    end.
+
+-spec read_while(list(), binary(), positions(), fun((integer()) -> boolean()), atom()) -> returntuple(list()).
+
+read_while(Acc, Source, Pos={{Line, Col}, StartPos}, Fun, Name) ->
     case Source of
-	<<>> -> finalize_while(Acc, Source, Pos, StartPos, Name);
+	<<>> -> finalize_while(Acc, Source, Pos, Name);
         <<C/utf8, Rest/binary>> ->
             case Fun(C) of
                 true -> read_while([C|Acc], Rest,
-                                   case C of $\n -> {Line+1,0}; _ -> {Line, Col+1} end,
-                                   StartPos, Fun, Name);
-                false -> finalize_while(Acc, Source, Pos, StartPos, Name)
+                                   {case C of $\n -> {Line+1,0}; _ -> {Line, Col+1} end, StartPos},
+                                   Fun, Name);
+                false -> finalize_while(Acc, Source, Pos, Name)
             end
     end.
 
-finalize_while(Acc, Source, Pos, StartPos, Name) ->
+-spec finalize_while( list(), binary(), positions(), atom() ) -> returntuple(list()) .
+
+finalize_while(Acc, Source, Pos, Name) ->
     case Acc of
-        [] -> {error, expected, Name, Pos, StartPos};
-        _ -> {ok, lists:reverse(Acc), Source, Pos, StartPos}
+        [] -> {error, expected, Name, Pos};
+        _ -> {ok, lists:reverse(Acc), Source, Pos}
     end.
 
 %% Whitespace, of which we have a special definition
 
-skip_whitespace(Source, Pos) ->
-    skip_whitespace(Source, Pos, Pos).
+-spec skip_whitespace(binary(), positions()) -> goodtuple(binary()).
 
-skip_whitespace(<<>>, Pos, StartPos) -> {ok, <<>>, <<>>, Pos, StartPos};
-skip_whitespace(Source, Pos={Line, Col}, StartPos) ->
-    <<C/utf8, Rest/binary>> = Source,
-    case C of
-        $\n -> skip_whitespace(Rest, {Line+1, 0}, StartPos);
-        _ when ?SPACE(C) -> skip_whitespace(Rest, {Line, Col+1}, StartPos);
-        _ -> {ok, <<>>, Source, Pos, StartPos}
+skip_whitespace(Source, Pos={{Line, Col}, StartPos}) ->
+    case Source of
+        <<>> -> {ok, <<>>, <<>>, Pos};
+        <<C/utf8, Rest/binary>> ->
+            case C of
+                $\n -> skip_whitespace(Rest, {{Line+1, 0}, StartPos});
+                _ when ?SPACE(C) -> skip_whitespace(Rest, {{Line, Col+1}, StartPos});
+                _ -> {ok, <<>>, Source, Pos}
+            end
     end.
