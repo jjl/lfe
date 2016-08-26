@@ -45,8 +45,7 @@
 
 -type position() :: {non_neg_integer(), non_neg_integer()}.
 -type positions() :: {position(), position()}.
--type state() :: {binary(), positions()}.
--type goodtuple(T) :: {'ok', T, state()}.
+-type goodtuple(T) :: {'ok', T, binary(), positions()}.
 -type unexpected() :: non_neg_integer() | 'eof'.
 -type expected() :: atom().
 -type numberbase() :: 2..36.
@@ -60,7 +59,7 @@
 -export([read/1, read/2]).
 
 -spec read(binary()) -> returntuple(any()).
--spec read(binary(), positions() | {position(),'unset'}) -> returntuple(any).
+-spec read(binary(), positions() | {position(),'unset'}) -> returntuple(any()).
 
 read(Source) -> read(Source, {{0,0}, unset}). %% minor ick, massive deduplication
 read(Source, Pos) ->
